@@ -5,14 +5,25 @@ extends Node2D
 
 # --- レベルデザイン定数 ---
 const FLOOR_HEIGHT := 140.0
-const NUM_FLOORS := 40
 const PLATFORM_WIDTH := 240.0
 const PLATFORM_HEIGHT := 24.0
-const PLAY_WIDTH := 640.0
+const PLAY_WIDTH := 720.0
 const CHECKPOINT_INTERVAL := 10
-const TREASURE_FLOORS := [5, 13, 17, 25, 33, 37]
+const TREASURE_INTERVAL := 8
+const TREASURE_OFFSET := 4
 
-# --- 登録者数バランス（合計 118,000,000。ゴール100,000,000に対し18%の余裕） ---
+# --- 塔は階数制限なし。プレイヤーの到達に応じて先読み生成する ---
+const INITIAL_FLOORS := 40
+const GENERATE_AHEAD := 15
+const GENERATE_BATCH := 20
+
+# --- 足場の間隔（隣接フロアの当たり判定が重ならないようにする） ---
+# 真上にジャンプしても頭がぶつからないよう、中心間オフセットは
+# 「両足場の半幅の合計 + 最低ギャップ」を必ず超える値にする
+const MIN_PLATFORM_GAP := 30.0
+const GAP_VARIANCE := 90.0
+
+# --- 登録者数バランス（通常進行+チェックポイント+財宝） ---
 const FLOOR_BONUS := 1_500_000.0
 const CHECKPOINT_BONUS := 10_000_000.0
 
@@ -50,16 +61,37 @@ const CHAT_IDLE_MESSAGES := [
 	"うぽつ〜", "もっと登れー!", "1億人いけー!!", "神プレイ",
 	"がんばれ〜", "応援してる!", "888888", "すごい", "ここすき",
 ]
-const CHAT_ON_FLOOR := ["登れ登れ!", "その調子!", "ナイスペース!"]
-const CHAT_ON_CHECKPOINT := ["登録者数跳ね上がったww", "チェックポイント到達おめ!", "でかい!!"]
-const CHAT_ON_TREASURE := ["お宝キタ!", "ナイス発見!", "ラッキー!"]
 const CHAT_ON_STOMP := ["ナイス踏みつけ!", "スライム瞬殺www", "うまい!"]
 const CHAT_ON_DAMAGE := ["危ない!", "被弾しちゃった…", "気をつけて!"]
 const CHAT_ON_FALL := ["落ちたー!", "うわあああ", "戻っちゃった…"]
 
+# --- 登録者数増加時に「新しい視聴者」が登録コメントを投稿する演出用データ ---
+const NEW_COMMENTER_COLOR := Color(1.0, 0.95, 0.4)
+const NEW_COMMENTER_PREFIXES := ["名無しの", "通りすがりの", "新参", "初見の", "旅の", "匿名の", ""]
+const NEW_COMMENTER_NOUNS := ["視聴者", "冒険者", "旅人", "登山家", "ファン", "リスナー"]
+const NEW_SUBSCRIBER_MESSAGES := [
+	"登録しました!!", "チャンネル登録ぽちー", "初コメです、登録した!",
+	"面白すぎて登録しちゃった", "登録者一人増えたよ〜", "登録完了!応援してる",
+]
+
 var world: Node2D
 var player: Player
 var sub_viewport: SubViewport
+
+# --- 塔生成の進行状態 ---
+var rng: RandomNumberGenerator
+var prev_x: float = 0.0
+var prev_width: float = 0.0
+var generated_floor: int = 0
+var bands_generated_up_to: int = -5
+
+# --- 背景・境界壁（塔の伸長に合わせて拡張する） ---
+var bg_poly: Polygon2D
+var bg_width: float = 2000.0
+var left_wall: StaticBody2D
+var left_shape: RectangleShape2D
+var right_wall: StaticBody2D
+var right_shape: RectangleShape2D
 
 var checkpoint_positions: Array[Vector2] = []
 var max_height_y: float = 0.0
@@ -82,10 +114,13 @@ var win_stats_label: Label
 
 func _ready() -> void:
 	GameState.reset()
+	rng = RandomNumberGenerator.new()
+	rng.seed = 20260811
+
 	_build_video_world()
-	_build_background()
-	_build_boundaries()
-	_generate_tower()
+	_init_environment()
+	_generate_start_platform()
+	_extend_tower(INITIAL_FLOORS)
 	_spawn_player()
 	_build_video_overlay()
 	_build_bottom_bar()
@@ -119,38 +154,59 @@ func _build_video_world() -> void:
 	sub_viewport.add_child(world)
 
 # ---------------------------------------------------------------------------
-# 塔の生成
+# 塔の生成（階数制限なし。プレイヤーの到達に応じて先読み生成する）
 # ---------------------------------------------------------------------------
 
-func _generate_tower() -> void:
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 20260811
-
+func _generate_start_platform() -> void:
 	var start_x := PLAY_WIDTH / 2.0
 	_add_platform(start_x, 0.0, 0, false)
 	last_checkpoint_pos = Vector2(start_x, -PLATFORM_HEIGHT / 2.0 - 30.0)
 	max_height_y = 0.0
+	prev_x = start_x
+	prev_width = PLATFORM_WIDTH
+	generated_floor = 0
 
-	var prev_x := start_x
-	for i in range(1, NUM_FLOORS + 1):
-		var side := 1.0 if i % 2 == 1 else -1.0
-		var offset := rng.randf_range(90.0, 200.0)
-		var min_x := PLATFORM_WIDTH / 2.0 + 40.0
-		var max_x := PLAY_WIDTH - PLATFORM_WIDTH / 2.0 - 40.0
-		var x: float = clamp(prev_x + side * offset, min_x, max_x)
-		var y := -float(i) * FLOOR_HEIGHT
+func _extend_tower(target_floor: int) -> void:
+	if target_floor <= generated_floor:
+		return
+
+	for i in range(generated_floor + 1, target_floor + 1):
 		var is_checkpoint := (i % CHECKPOINT_INTERVAL == 0)
+		var this_width := PLATFORM_WIDTH * 1.4 if is_checkpoint else PLATFORM_WIDTH
+		var y := -float(i) * FLOOR_HEIGHT
+
+		# 前の足場と必ず離れる（重ならない）ように、中心間の最低オフセットを
+		# 「両足場の半幅の合計 + 最低ギャップ」として計算する
+		var min_offset: float = prev_width / 2.0 + this_width / 2.0 + MIN_PLATFORM_GAP
+		var offset := min_offset + rng.randf_range(0.0, GAP_VARIANCE)
+		var side := 1.0 if i % 2 == 1 else -1.0
+
+		var min_x := this_width / 2.0 + 40.0
+		var max_x := PLAY_WIDTH - this_width / 2.0 - 40.0
+
+		var x: float = clamp(prev_x + side * offset, min_x, max_x)
+		if absf(x - prev_x) < min_offset:
+			side = -side
+			x = clamp(prev_x + side * offset, min_x, max_x)
+		if absf(x - prev_x) < min_offset:
+			# 画面端付近でどちらの側にも十分な間隔が確保できない場合は、
+			# 最も離れる位置（反対側の端）に寄せる
+			x = max_x if prev_x <= (min_x + max_x) / 2.0 else min_x
 
 		_add_platform(x, y, i, is_checkpoint)
 
 		if is_checkpoint:
 			checkpoint_positions.append(Vector2(x, y - PLATFORM_HEIGHT / 2.0 - 30.0))
-		elif TREASURE_FLOORS.has(i):
+		elif i % TREASURE_INTERVAL == TREASURE_OFFSET:
 			_add_treasure(x, y)
 		elif i % 3 == 0 and i > 2:
 			_add_enemy(x, y)
 
 		prev_x = x
+		prev_width = this_width
+
+	generated_floor = target_floor
+	_extend_environment(target_floor)
 
 func _add_platform(x: float, y: float, floor_index: int, is_checkpoint: bool) -> void:
 	var body := StaticBody2D.new()
@@ -190,47 +246,30 @@ func _add_treasure(x: float, y: float) -> void:
 	t.position = Vector2(x, y - PLATFORM_HEIGHT / 2.0 - 20.0)
 	world.add_child(t)
 
-func _build_background() -> void:
-	var total_height := NUM_FLOORS * FLOOR_HEIGHT + 600.0
-	var bg := Polygon2D.new()
-	var w := 2000.0
-	bg.polygon = PackedVector2Array([
-		Vector2(-w / 2.0, 200.0), Vector2(w / 2.0, 200.0),
-		Vector2(w / 2.0, -total_height), Vector2(-w / 2.0, -total_height)
-	])
-	bg.color = Color(0.13, 0.11, 0.22)
-	bg.z_index = -10
-	bg.position.x = PLAY_WIDTH / 2.0
-	world.add_child(bg)
+# ---------------------------------------------------------------------------
+# 背景・境界壁（塔の伸長に合わせて拡張する）
+# ---------------------------------------------------------------------------
 
-	for i in range(0, NUM_FLOORS + 1, 5):
-		var band := ColorRect.new()
-		band.color = Color(1, 1, 1, 0.03)
-		band.size = Vector2(w, FLOOR_HEIGHT * 2.5)
-		band.position = Vector2(PLAY_WIDTH / 2.0 - w / 2.0, -float(i) * FLOOR_HEIGHT - FLOOR_HEIGHT * 2.5)
-		band.z_index = -9
-		world.add_child(band)
+func _init_environment() -> void:
+	bg_poly = Polygon2D.new()
+	bg_poly.color = Color(0.13, 0.11, 0.22)
+	bg_poly.z_index = -10
+	bg_poly.position.x = PLAY_WIDTH / 2.0
+	world.add_child(bg_poly)
 
-func _build_boundaries() -> void:
-	var total_height := NUM_FLOORS * FLOOR_HEIGHT + 400.0
-
-	var left := StaticBody2D.new()
-	var lshape := RectangleShape2D.new()
-	lshape.size = Vector2(40.0, total_height)
+	left_wall = StaticBody2D.new()
+	left_shape = RectangleShape2D.new()
 	var lcol := CollisionShape2D.new()
-	lcol.shape = lshape
-	left.add_child(lcol)
-	left.position = Vector2(-20.0, -total_height / 2.0 + 200.0)
-	world.add_child(left)
+	lcol.shape = left_shape
+	left_wall.add_child(lcol)
+	world.add_child(left_wall)
 
-	var right := StaticBody2D.new()
-	var rshape := RectangleShape2D.new()
-	rshape.size = Vector2(40.0, total_height)
+	right_wall = StaticBody2D.new()
+	right_shape = RectangleShape2D.new()
 	var rcol := CollisionShape2D.new()
-	rcol.shape = rshape
-	right.add_child(rcol)
-	right.position = Vector2(PLAY_WIDTH + 20.0, -total_height / 2.0 + 200.0)
-	world.add_child(right)
+	rcol.shape = right_shape
+	right_wall.add_child(rcol)
+	world.add_child(right_wall)
 
 	var safety := StaticBody2D.new()
 	var sshape := RectangleShape2D.new()
@@ -241,15 +280,48 @@ func _build_boundaries() -> void:
 	safety.position = Vector2(PLAY_WIDTH / 2.0, 120.0)
 	world.add_child(safety)
 
+	_extend_environment(0)
+
+func _extend_environment(target_floor: int) -> void:
+	var bottom_y := 200.0
+
+	var bg_top := -float(target_floor) * FLOOR_HEIGHT - 600.0
+	bg_poly.polygon = PackedVector2Array([
+		Vector2(-bg_width / 2.0, bottom_y), Vector2(bg_width / 2.0, bottom_y),
+		Vector2(bg_width / 2.0, bg_top), Vector2(-bg_width / 2.0, bg_top)
+	])
+
+	var wall_top := -float(target_floor) * FLOOR_HEIGHT - 400.0
+	var wall_height := bottom_y - wall_top
+	var wall_center_y := (wall_top + bottom_y) / 2.0
+
+	left_shape.size = Vector2(40.0, wall_height)
+	left_wall.position = Vector2(-20.0, wall_center_y)
+
+	right_shape.size = Vector2(40.0, wall_height)
+	right_wall.position = Vector2(PLAY_WIDTH + 20.0, wall_center_y)
+
+	var i := bands_generated_up_to + 5
+	while i <= target_floor:
+		var band := ColorRect.new()
+		band.color = Color(1, 1, 1, 0.03)
+		band.size = Vector2(bg_width, FLOOR_HEIGHT * 2.5)
+		band.position = Vector2(PLAY_WIDTH / 2.0 - bg_width / 2.0, -float(i) * FLOOR_HEIGHT - FLOOR_HEIGHT * 2.5)
+		band.z_index = -9
+		world.add_child(band)
+		bands_generated_up_to = i
+		i += 5
+
 func _spawn_player() -> void:
 	player = Player.new()
 	player.position = Vector2(PLAY_WIDTH / 2.0, -80.0)
 	sub_viewport.add_child(player)
-	player.set_camera_limits(-20.0, PLAY_WIDTH + 20.0, -NUM_FLOORS * FLOOR_HEIGHT - 200.0, 150.0)
+	# 階数制限なしのため、カメラの上限はごく大きな値にして実質無制限にする
+	player.set_camera_limits(-20.0, PLAY_WIDTH + 20.0, -100_000_000.0, 150.0)
 	player.stomped_enemy.connect(func() -> void: _add_chat_message(CHAT_ON_STOMP.pick_random()))
 
 # ---------------------------------------------------------------------------
-# 進行判定（通常進行・階層到達ボーナス・降下・落下）
+# 進行判定（通常進行・階層到達ボーナス・降下・落下・先読み生成）
 # ---------------------------------------------------------------------------
 
 func _process(delta: float) -> void:
@@ -260,7 +332,7 @@ func _process(delta: float) -> void:
 
 	if y < max_height_y:
 		max_height_y = y
-		var new_floor: int = int(clamp(floor((0.0 - max_height_y) / FLOOR_HEIGHT), 0, NUM_FLOORS))
+		var new_floor: int = int(floor((0.0 - max_height_y) / FLOOR_HEIGHT))
 		while reached_floor < new_floor:
 			reached_floor += 1
 			GameState.add_subscribers(FLOOR_BONUS, "登頂中")
@@ -269,7 +341,10 @@ func _process(delta: float) -> void:
 				var idx := reached_floor / CHECKPOINT_INTERVAL - 1
 				if idx >= 0 and idx < checkpoint_positions.size():
 					last_checkpoint_pos = checkpoint_positions[idx]
-			floor_label.text = "現在 %d / %d 階" % [reached_floor, NUM_FLOORS]
+			floor_label.text = "現在 %d 階" % reached_floor
+
+		if reached_floor + GENERATE_AHEAD > generated_floor:
+			_extend_tower(generated_floor + GENERATE_BATCH)
 
 	var depth_below_best := y - max_height_y
 	if depth_below_best > DESCEND_THRESHOLD:
@@ -380,7 +455,7 @@ func _build_bottom_bar() -> void:
 	bar.add_child(progress)
 
 	floor_label = Label.new()
-	floor_label.text = "現在 0 / %d 階" % NUM_FLOORS
+	floor_label.text = "現在 0 階"
 	floor_label.add_theme_font_size_override("font_size", 14)
 	floor_label.position = Vector2(16, 50)
 	bar.add_child(floor_label)
@@ -486,14 +561,27 @@ func _on_chat_timer_timeout() -> void:
 
 func _add_chat_message(text: String) -> void:
 	var user: Dictionary = CHAT_USERNAMES.pick_random()
+	_add_chat_line(user["name"], user["color"], text)
+
+func _random_new_commenter_name() -> String:
+	var prefix: String = NEW_COMMENTER_PREFIXES.pick_random()
+	var noun: String = NEW_COMMENTER_NOUNS.pick_random()
+	return "%s%s%d" % [prefix, noun, randi_range(100, 9999)]
+
+func _add_new_subscriber_comment() -> void:
+	var commenter_name := _random_new_commenter_name()
+	var msg: String = NEW_SUBSCRIBER_MESSAGES.pick_random()
+	_add_chat_line(commenter_name, NEW_COMMENTER_COLOR, "🔔" + msg)
+
+func _add_chat_line(user_name: String, color: Color, text: String) -> void:
 	var line := RichTextLabel.new()
 	line.bbcode_enabled = true
 	line.fit_content = true
 	line.scroll_active = false
 	line.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	line.custom_minimum_size = Vector2(CHAT_WIDTH - 24.0, 0)
-	var color_hex: String = (user["color"] as Color).to_html(false)
-	line.text = "[color=#%s]%s[/color]: %s" % [color_hex, user["name"], text]
+	var color_hex := color.to_html(false)
+	line.text = "[color=#%s]%s[/color]: %s" % [color_hex, user_name, text]
 	line.add_theme_font_size_override("normal_font_size", 13)
 	chat_vbox.add_child(line)
 
@@ -513,12 +601,9 @@ func _on_subscriber_changed(total: int, delta: int, reason: String) -> void:
 	if abs(delta) >= POPUP_MIN_DELTA:
 		_spawn_popup(delta, reason)
 	match reason:
-		"登頂中":
-			_add_chat_message(CHAT_ON_FLOOR.pick_random())
-		"階層到達ボーナス!":
-			_add_chat_message(CHAT_ON_CHECKPOINT.pick_random())
-		"財宝入手":
-			_add_chat_message(CHAT_ON_TREASURE.pick_random())
+		"登頂中", "階層到達ボーナス!", "財宝入手":
+			# 登録者数が増えるたびに、新しい視聴者が登録コメントを投稿する演出
+			_add_new_subscriber_comment()
 		"被弾":
 			_add_chat_message(CHAT_ON_DAMAGE.pick_random())
 		"落下":
@@ -595,7 +680,7 @@ func _build_win_screen() -> void:
 	win_layer.visible = false
 
 func _on_game_won() -> void:
-	win_stats_label.text = "到達フロア: %d / %d 階" % [reached_floor, NUM_FLOORS]
+	win_stats_label.text = "到達フロア: %d 階" % reached_floor
 	win_layer.visible = true
 	get_tree().paused = true
 
