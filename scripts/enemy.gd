@@ -53,7 +53,8 @@ func _physics_process(delta: float) -> void:
 		direction = -1
 	elif global_position.x < start_x - patrol_half_width:
 		direction = 1
-	sprite.scale.x = absf(sprite.scale.x) * direction
+	# enemy.png はデフォルトで右向き（進行方向と逆）に見えるため反転して合わせる
+	sprite.scale.x = absf(sprite.scale.x) * -direction
 
 func stomp() -> void:
 	queue_free()

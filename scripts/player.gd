@@ -33,6 +33,11 @@ const LAYER_PLAYER := 8
 const MASK_NORMAL := LAYER_PLATFORM | LAYER_WALL | LAYER_ENEMY
 const MASK_ROCKET := LAYER_WALL | LAYER_ENEMY
 
+const PLAYER_TEXTURE := preload("res://assets/touzoku.png")
+# touzoku.png の不透明範囲（Python/Pillowで検出）。余白を切り出して使う
+const PLAYER_OPAQUE_REGION := Rect2(3.0, 2.0, 56.0, 59.0)
+const PLAYER_RENDER_HEIGHT := 56.0
+
 const SFX_JUMP := preload("res://assets/player_jump.wav")
 const SFX_DAMAGE := preload("res://assets/player_damaged2.wav")
 const SFX_ENEMY_KILLED := preload("res://assets/enemy_killed2.wav")
@@ -73,15 +78,16 @@ func _build_visuals() -> void:
 	visual.name = "Visual"
 	add_child(visual)
 
-	var body := Polygon2D.new()
-	body.polygon = PackedVector2Array([Vector2(-16, -24), Vector2(16, -24), Vector2(16, 24), Vector2(-16, 24)])
-	body.color = Color(0.25, 0.75, 0.95)
-	visual.add_child(body)
+	var atlas := AtlasTexture.new()
+	atlas.atlas = PLAYER_TEXTURE
+	atlas.region = PLAYER_OPAQUE_REGION
+	var scale_factor := PLAYER_RENDER_HEIGHT / PLAYER_OPAQUE_REGION.size.y
 
-	var eye := Polygon2D.new()
-	eye.polygon = PackedVector2Array([Vector2(2, -14), Vector2(14, -14), Vector2(14, -4), Vector2(2, -4)])
-	eye.color = Color(1, 1, 1)
-	visual.add_child(eye)
+	var sprite := Sprite2D.new()
+	sprite.texture = atlas
+	sprite.scale = Vector2(scale_factor, scale_factor)
+	sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	visual.add_child(sprite)
 
 	camera = Camera2D.new()
 	camera.position_smoothing_enabled = true

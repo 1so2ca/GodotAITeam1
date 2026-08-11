@@ -30,9 +30,12 @@ const GAP_VARIANCE := 90.0
 # --- 足場の見た目（assets/content.png のレンガをタイル状に敷き詰める） ---
 # PLATFORM_WIDTH(240)・チェックポイント幅(336)がどちらも48の倍数になるように選んでいる
 const TILE_RENDER_WIDTH := 48.0
-# content.png は右・上・下に透明な余白があり、そのままタイルすると余白分の隙間が
+# content_resize.png は上下に透明な余白があり、そのままタイルすると余白分の隙間が
 # 見えてしまうため、不透明な範囲だけを切り出して使う（Python/Pillowで検出した範囲）
-const CONTENT_OPAQUE_REGION := Rect2(0.0, 22.0, 1488.0, 936.0)
+const CONTENT_OPAQUE_REGION := Rect2(0.0, 25.0, 1024.0, 936.0)
+
+# --- 背景（assets/background.png をループ表示する） ---
+const BACKGROUND_TEXTURE := preload("res://assets/background.png")
 
 # --- 衝突レイヤー（ロケット中に足場だけ貫通できるようにするため分離する） ---
 const LAYER_PLATFORM := 1
@@ -85,6 +88,13 @@ const CHAT_IDLE_MESSAGES := [
 const CHAT_ON_STOMP := ["ナイス踏みつけ!", "スライム瞬殺www", "うまい!"]
 const CHAT_ON_DAMAGE := ["危ない!", "被弾しちゃった…", "気をつけて!"]
 const CHAT_ON_FALL := ["落ちたー!", "うわあああ", "戻っちゃった…"]
+const CHAT_WIN_MESSAGES := [
+	"きたあああああ1億人達成!!!", "神プレイすぎる!!!", "伝説を見た…",
+	"うおおおおおおおおお", "1億人おめでとう!!!!", "こんなの見たことない",
+	"歴史的瞬間に立ち会えた", "最高すぎる配信だった", "感動した…泣いてる",
+	"これは殿堂入り", "神回確定", "拍手拍手拍手拍手拍手",
+	"財宝山分けされるらしい!!", "伝説の大盗賊誕生の瞬間", "語彙力なくなるくらいすごい",
+]
 
 # --- 登録者数増加時に「新しい視聴者」が登録コメントを投稿する演出用データ ---
 const NEW_COMMENTER_COLOR := Color(1.0, 0.95, 0.4)
@@ -109,7 +119,7 @@ var bands_generated_up_to: int = -5
 var floors_since_item: int = 0
 
 # --- 背景・境界壁（塔の伸長に合わせて拡張する） ---
-var bg_poly: Polygon2D
+var bg_sprite: Sprite2D
 var bg_width: float = 2000.0
 var left_wall: StaticBody2D
 var left_shape: RectangleShape2D
@@ -129,15 +139,18 @@ var floor_label: Label
 var chat_vbox: VBoxContainer
 var chat_scroll: ScrollContainer
 var chat_timer: Timer
-var win_layer: CanvasLayer
-var win_stats_label: Label
+var win_overlay: Control
+var win_flash: ColorRect
+var win_title_label: Label
+var win_chat_timer: Timer
+var clear_sfx: AudioStreamPlayer
 
 func _ready() -> void:
 	GameState.reset()
 	rng = RandomNumberGenerator.new()
 	rng.seed = int(Time.get_unix_time_from_system() * 1000) % 2147483647
 	rng.randomize()
-	content_texture = load("res://assets/content.png")
+	content_texture = load("res://assets/content_resize.png")
 
 	_build_video_world()
 	_init_environment()
@@ -324,11 +337,13 @@ func _spawn_item_popup(text: String) -> void:
 # ---------------------------------------------------------------------------
 
 func _init_environment() -> void:
-	bg_poly = Polygon2D.new()
-	bg_poly.color = Color(0.13, 0.11, 0.22)
-	bg_poly.z_index = -10
-	bg_poly.position.x = PLAY_WIDTH / 2.0
-	world.add_child(bg_poly)
+	bg_sprite = Sprite2D.new()
+	bg_sprite.texture = BACKGROUND_TEXTURE
+	bg_sprite.centered = false
+	bg_sprite.region_enabled = true
+	bg_sprite.texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+	bg_sprite.z_index = -10
+	world.add_child(bg_sprite)
 
 	left_wall = StaticBody2D.new()
 	left_shape = RectangleShape2D.new()
@@ -365,10 +380,9 @@ func _extend_environment(target_floor: int) -> void:
 	var bottom_y := 200.0
 
 	var bg_top := -float(target_floor) * FLOOR_HEIGHT - 600.0
-	bg_poly.polygon = PackedVector2Array([
-		Vector2(-bg_width / 2.0, bottom_y), Vector2(bg_width / 2.0, bottom_y),
-		Vector2(bg_width / 2.0, bg_top), Vector2(-bg_width / 2.0, bg_top)
-	])
+	var bg_left := PLAY_WIDTH / 2.0 - bg_width / 2.0
+	bg_sprite.position = Vector2(bg_left, bg_top)
+	bg_sprite.region_rect = Rect2(0.0, 0.0, bg_width, bottom_y - bg_top)
 
 	var wall_top := -float(target_floor) * FLOOR_HEIGHT - 400.0
 	var wall_height := bottom_y - wall_top
@@ -641,7 +655,7 @@ func _add_chat_message(text: String) -> void:
 func _random_new_commenter_name() -> String:
 	var prefix: String = NEW_COMMENTER_PREFIXES.pick_random()
 	var noun: String = NEW_COMMENTER_NOUNS.pick_random()
-	return "%s%s%d" % [prefix, noun, randi_range(100, 9999)]
+	return "%s%s" % [prefix, noun]
 
 func _add_new_subscriber_comment() -> void:
 	var commenter_name := _random_new_commenter_name()
@@ -729,51 +743,86 @@ func _format_number(n: int) -> String:
 # ---------------------------------------------------------------------------
 
 func _build_win_screen() -> void:
-	win_layer = CanvasLayer.new()
-	win_layer.layer = 20
-	win_layer.process_mode = Node.PROCESS_MODE_ALWAYS
-	add_child(win_layer)
+	# 演出は配信画面（動画エリア）の中だけで完結させる。チャット・下部バーは隠さない
+	win_overlay = Control.new()
+	win_overlay.position = Vector2.ZERO
+	win_overlay.size = Vector2(VIDEO_WIDTH, VIDEO_HEIGHT)
+	win_overlay.clip_contents = true
+	win_overlay.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	win_overlay.visible = false
+	ui_root.add_child(win_overlay)
 
-	var dim := ColorRect.new()
-	dim.color = Color(0, 0, 0, 0.75)
-	dim.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	win_layer.add_child(dim)
+	win_flash = ColorRect.new()
+	win_flash.color = Color(1.0, 0.9, 0.3, 0.0)
+	win_flash.size = Vector2(VIDEO_WIDTH, VIDEO_HEIGHT)
+	win_flash.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	win_overlay.add_child(win_flash)
 
-	var vbox := VBoxContainer.new()
-	vbox.set_anchors_and_offsets_preset(Control.PRESET_CENTER)
-	vbox.alignment = BoxContainer.ALIGNMENT_CENTER
-	win_layer.add_child(vbox)
-
-	var title := Label.new()
-	title.text = "登録者数 1億人 達成！"
-	title.add_theme_font_size_override("font_size", 32)
-	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vbox.add_child(title)
-
-	var msg := Label.new()
-	msg.text = "「塔の中で手に入れたものは、ちゃんとみんなに配るぜ！」"
-	msg.add_theme_font_size_override("font_size", 18)
-	msg.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vbox.add_child(msg)
-
-	win_stats_label = Label.new()
-	win_stats_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	vbox.add_child(win_stats_label)
+	win_title_label = Label.new()
+	win_title_label.text = "登録者数 1億人 達成！！"
+	win_title_label.add_theme_font_size_override("font_size", 28)
+	win_title_label.add_theme_color_override("font_color", Color(1.0, 0.9, 0.3))
+	win_title_label.size = Vector2(VIDEO_WIDTH, 40)
+	win_title_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	win_title_label.position = Vector2(0, VIDEO_HEIGHT / 2.0 - 70.0)
+	win_title_label.pivot_offset = Vector2(VIDEO_WIDTH / 2.0, 20.0)
+	win_title_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	win_overlay.add_child(win_title_label)
 
 	var btn := Button.new()
 	btn.text = "もう一度プレイ"
 	btn.custom_minimum_size = Vector2(160, 40)
+	btn.position = Vector2(VIDEO_WIDTH / 2.0 - 80.0, VIDEO_HEIGHT / 2.0 + 10.0)
 	btn.pressed.connect(_on_restart_pressed)
-	vbox.add_child(btn)
+	win_overlay.add_child(btn)
 
-	win_layer.visible = false
+	clear_sfx = AudioStreamPlayer.new()
+	clear_sfx.stream = preload("res://assets/clear.mp3")
+	add_child(clear_sfx)
+
+	win_chat_timer = Timer.new()
+	win_chat_timer.one_shot = false
+	win_chat_timer.wait_time = 0.06
+	win_chat_timer.timeout.connect(func() -> void: _add_chat_message(CHAT_WIN_MESSAGES.pick_random()))
+	add_child(win_chat_timer)
 
 func _on_game_won() -> void:
-	win_stats_label.text = "到達フロア: %d 階" % reached_floor
-	win_layer.visible = true
-	get_tree().paused = true
+	win_overlay.visible = true
+	clear_sfx.play()
+
+	chat_timer.stop()
+	win_chat_timer.start()
+
+	var flash_tw := create_tween()
+	flash_tw.set_loops()
+	flash_tw.tween_property(win_flash, "color:a", 0.4, 0.12)
+	flash_tw.tween_property(win_flash, "color:a", 0.0, 0.35)
+
+	var title_tw := create_tween()
+	title_tw.set_loops()
+	title_tw.tween_property(win_title_label, "scale", Vector2(1.15, 1.15), 0.35).set_trans(Tween.TRANS_SINE)
+	title_tw.tween_property(win_title_label, "scale", Vector2(1.0, 1.0), 0.35).set_trans(Tween.TRANS_SINE)
+
+	var confetti_timer := Timer.new()
+	confetti_timer.one_shot = false
+	confetti_timer.wait_time = 0.1
+	confetti_timer.timeout.connect(_spawn_win_confetti)
+	add_child(confetti_timer)
+	confetti_timer.start()
+
+func _spawn_win_confetti() -> void:
+	var glyphs := ["🎉", "✨", "💰", "🎊", "⭐"]
+	var lbl := Label.new()
+	lbl.text = glyphs.pick_random()
+	lbl.add_theme_font_size_override("font_size", randi_range(18, 32))
+	lbl.position = Vector2(randf_range(0.0, VIDEO_WIDTH), VIDEO_HEIGHT + 20.0)
+	win_overlay.add_child(lbl)
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(lbl, "position:y", -40.0, randf_range(1.2, 2.2))
+	tw.tween_property(lbl, "rotation", randf_range(-TAU, TAU), 1.6)
+	tw.chain().tween_callback(lbl.queue_free)
 
 func _on_restart_pressed() -> void:
-	get_tree().paused = false
 	GameState.reset()
 	get_tree().reload_current_scene()
