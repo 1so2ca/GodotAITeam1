@@ -41,10 +41,14 @@ const PLAYER_RENDER_HEIGHT := 56.0
 const SFX_JUMP := preload("res://assets/player_jump.wav")
 const SFX_DAMAGE := preload("res://assets/player_damaged2.wav")
 const SFX_ENEMY_KILLED := preload("res://assets/enemy_killed2.wav")
+const SFX_HEADHURT := preload("res://assets/player_headhurt.wav")
+const SFX_GETITEM := preload("res://assets/player_getitem.wav")
 
 var jump_sfx: AudioStreamPlayer
 var damage_sfx: AudioStreamPlayer
 var enemy_killed_sfx: AudioStreamPlayer
+var headhurt_sfx: AudioStreamPlayer
+var getitem_sfx: AudioStreamPlayer
 
 var idle_time := 0.0
 var hitstun_timer := 0.0
@@ -107,6 +111,14 @@ func _build_visuals() -> void:
 	enemy_killed_sfx.stream = SFX_ENEMY_KILLED
 	add_child(enemy_killed_sfx)
 
+	headhurt_sfx = AudioStreamPlayer.new()
+	headhurt_sfx.stream = SFX_HEADHURT
+	add_child(headhurt_sfx)
+
+	getitem_sfx = AudioStreamPlayer.new()
+	getitem_sfx.stream = SFX_GETITEM
+	add_child(getitem_sfx)
+
 func set_camera_limits(left: float, right: float, top: float, bottom: float) -> void:
 	camera.limit_left = int(left)
 	camera.limit_right = int(right)
@@ -162,6 +174,7 @@ func _physics_process(delta: float) -> void:
 	_update_idle(delta)
 
 func apply_item_effect(kind: int, duration: float) -> void:
+	getitem_sfx.play()
 	match kind:
 		Item.Kind.INVINCIBLE:
 			invuln_timer = max(invuln_timer, duration)
@@ -188,6 +201,10 @@ func _handle_collisions() -> void:
 				stomped_enemy.emit()
 			else:
 				take_damage(collider.global_position)
+		elif col.get_normal().y > 0.5:
+			# 天井（上方向を向いた面）に頭をぶつけた
+			if not headhurt_sfx.playing:
+				headhurt_sfx.play()
 
 func take_damage(source_pos: Vector2 = global_position) -> void:
 	if invuln_timer > 0.0 or hitstun_timer > 0.0:

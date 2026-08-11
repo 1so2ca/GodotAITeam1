@@ -53,7 +53,12 @@ const CHECKPOINT_BONUS := 10_000_000.0
 # その場にリセットする（＝自動減少を止める）。ここでまた離れれば再度減点される。
 const DESCEND_THRESHOLD := FLOOR_HEIGHT * 0.9
 const DESCEND_GRACE := 1.5
-const DESCEND_PENALTY := 2_000_000.0
+# 減点は固定値ではなく「現在の登録者数に対する割合」×「落下フロア数」で決める。
+# 大きく落ちるほど割合が増え、長く落ち続けるほど判定が繰り返されるため、
+# 高所からの大転落は登録者数が1万人前後まで落ち込むほどの大打撃になる
+const DESCEND_PENALTY_RATIO_PER_FLOOR := 0.05
+const DESCEND_PENALTY_MIN_RATIO := 0.08
+const DESCEND_PENALTY_MAX_RATIO := 0.7
 
 const POPUP_MIN_DELTA := 50_000
 
@@ -342,6 +347,9 @@ func _init_environment() -> void:
 	bg_sprite.centered = false
 	bg_sprite.region_enabled = true
 	bg_sprite.texture_repeat = CanvasItem.TEXTURE_REPEAT_ENABLED
+	bg_sprite.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+	# 足場のブロック（TILE_RENDER_WIDTH）と同じサイズでループさせる
+	bg_sprite.scale = Vector2.ONE * (TILE_RENDER_WIDTH / BACKGROUND_TEXTURE.get_size().x)
 	bg_sprite.z_index = -10
 	world.add_child(bg_sprite)
 
@@ -382,7 +390,8 @@ func _extend_environment(target_floor: int) -> void:
 	var bg_top := -float(target_floor) * FLOOR_HEIGHT - 600.0
 	var bg_left := PLAY_WIDTH / 2.0 - bg_width / 2.0
 	bg_sprite.position = Vector2(bg_left, bg_top)
-	bg_sprite.region_rect = Rect2(0.0, 0.0, bg_width, bottom_y - bg_top)
+	# region_rect はスケール適用前のローカル単位。実際の見た目のサイズをスケールで割って求める
+	bg_sprite.region_rect = Rect2(0.0, 0.0, bg_width / bg_sprite.scale.x, (bottom_y - bg_top) / bg_sprite.scale.y)
 
 	var wall_top := -float(target_floor) * FLOOR_HEIGHT - 400.0
 	var wall_height := bottom_y - wall_top
@@ -443,7 +452,9 @@ func _process(delta: float) -> void:
 	if depth_below_best > DESCEND_THRESHOLD:
 		descend_timer += delta
 		if descend_timer > DESCEND_GRACE:
-			GameState.lose_subscribers(DESCEND_PENALTY, "降下")
+			var floors_fallen := depth_below_best / FLOOR_HEIGHT
+			var ratio: float = clamp(floors_fallen * DESCEND_PENALTY_RATIO_PER_FLOOR, DESCEND_PENALTY_MIN_RATIO, DESCEND_PENALTY_MAX_RATIO)
+			GameState.lose_subscribers(GameState.subscriber_count * ratio, "降下")
 			max_height_y = y
 			descend_timer = 0.0
 	else:

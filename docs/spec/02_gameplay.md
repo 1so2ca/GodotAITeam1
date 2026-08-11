@@ -45,11 +45,13 @@
 - ジグザグに配置した足場をジャンプで登っていく構成
 - 足場の見た目は `assets/content_resize.png`（レンガ調のタイル画像）を敷き詰めて表示する
   （画像の透明な余白を切り出してから並べることで、タイルの継ぎ目に隙間ができないようにしている）
-- 背景は `assets/background.png` をループ表示する（塔の伸長に合わせて縦方向のループ範囲も拡張する）
+- 背景は `assets/background.png` を足場のブロックと同じサイズでループ表示する
+  （塔の伸長に合わせて縦方向のループ範囲も拡張する）
 - 主人公の見た目は `assets/touzoku.png` を使用する
 - 敵の見た目は `assets/enemy.png` を使用する（移動方向に応じて画像を反転させる）
 - 効果音：ジャンプ（`assets/player_jump.wav`）、被弾（`assets/player_damaged2.wav`）、
-  敵撃破（`assets/enemy_killed2.wav`）、1億人達成（`assets/clear.mp3`）
+  敵撃破（`assets/enemy_killed2.wav`）、天井に頭をぶつけた時（`assets/player_headhurt.wav`）、
+  アイテム取得時（`assets/player_getitem.wav`）、1億人達成（`assets/clear.mp3`）
 - 隣り合う階の足場は、当たり判定の範囲が重ならないよう最低間隔を確保して配置する
   （＝真上にジャンプしても頭が上の階にぶつからない。間隔は横移動でジャンプして届く範囲に収める）
 - 10階ごとにひときわ大きい足場＝チェックポイントを配置し（足場を金色に色調変更して区別）、到達で登録者数が一気に増加する
