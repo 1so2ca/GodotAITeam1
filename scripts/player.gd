@@ -7,9 +7,10 @@ signal took_damage
 signal stomped_enemy
 
 const SPEED := 260.0
-const JUMP_VELOCITY := -560.0
-const GRAVITY := 1400.0
-const BOUNCE_VELOCITY := -380.0
+const JUMP_VELOCITY := -560.0 * 1.1
+const GRAVITY := 1400.0 * 0.8
+# const BOUNCE_VELOCITY := -380.0
+const BOUNCE_VELOCITY := JUMP_VELOCITY
 const MAX_FALL_SPEED := 900.0
 
 const DAMAGE_PENALTY := 2_000_000.0
