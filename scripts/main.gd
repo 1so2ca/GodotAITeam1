@@ -27,6 +27,19 @@ const GENERATE_BATCH := 20
 const MIN_PLATFORM_GAP := 30.0
 const GAP_VARIANCE := 90.0
 
+# --- 足場の見た目（assets/content.png のレンガをタイル状に敷き詰める） ---
+# PLATFORM_WIDTH(240)・チェックポイント幅(336)がどちらも48の倍数になるように選んでいる
+const TILE_RENDER_WIDTH := 48.0
+# content.png は右・上・下に透明な余白があり、そのままタイルすると余白分の隙間が
+# 見えてしまうため、不透明な範囲だけを切り出して使う（Python/Pillowで検出した範囲）
+const CONTENT_OPAQUE_REGION := Rect2(0.0, 22.0, 1488.0, 936.0)
+
+# --- 衝突レイヤー（ロケット中に足場だけ貫通できるようにするため分離する） ---
+const LAYER_PLATFORM := 1
+const LAYER_WALL := 2
+const LAYER_ENEMY := 4
+const LAYER_PLAYER := 8
+
 # --- 登録者数バランス（通常進行+チェックポイント+財宝） ---
 const FLOOR_BONUS := 1_500_000.0
 const CHECKPOINT_BONUS := 10_000_000.0
@@ -49,21 +62,25 @@ const BOTTOM_BAR_HEIGHT := 130.0
 const VIDEO_WIDTH := WINDOW_WIDTH - CHAT_WIDTH
 const VIDEO_HEIGHT := WINDOW_HEIGHT - BOTTOM_BAR_HEIGHT
 
-const STREAM_TITLE := "無限の塔登り配信中！スライム踏みつけ実況"
-const CHANNEL_NAME := "とうのぼりチャンネル"
+const STREAM_TITLE := "無限の塔登り配信中！～登録者数1億人へのカウントダウン開始！～"
+const CHANNEL_NAME := "世紀の大盗賊CH【財宝山分けプロジェクト】"
 
 # --- ライブチャット演出（コメント欄）用データ ---
+# unlock_floor: このユーザーが登場し始める到達階数（それより前は他ユーザーのみ発言する）
 const CHAT_USERNAMES := [
-	{"name": "とうろく太郎", "color": Color(0.45, 0.8, 1.0)},
-	{"name": "のぼりer", "color": Color(0.6, 0.9, 0.45)},
-	{"name": "財宝ハンター", "color": Color(1.0, 0.8, 0.35)},
-	{"name": "スライム倒す人", "color": Color(1.0, 0.55, 0.75)},
-	{"name": "匿名視聴者", "color": Color(0.8, 0.8, 0.85)},
-	{"name": "登録者Bot", "color": Color(0.75, 0.65, 1.0)},
+	{"name": "塔の税務署", "color": Color(0.6, 0.7, 0.95), "unlock_floor": 0},
+	{"name": "1億人耐久@金塊待ち", "color": Color(1.0, 0.85, 0.3), "unlock_floor": 0},
+	{"name": "古事記のエルフ", "color": Color(0.55, 0.9, 0.6), "unlock_floor": 20},
+	{"name": "お宝クレクレスライム", "color": Color(0.9, 0.55, 0.95), "unlock_floor": 20},
+	{"name": "山分け希望のゴブリン", "color": Color(0.9, 0.55, 0.3), "unlock_floor": 30},
+	{"name": "錬金術失敗したマン", "color": Color(0.7, 0.55, 0.85), "unlock_floor": 30},
 ]
 const CHAT_IDLE_MESSAGES := [
 	"うぽつ〜", "もっと登れー!", "1億人いけー!!", "神プレイ",
 	"がんばれ〜", "応援してる!", "888888", "すごい", "ここすき",
+	"お見事！さすがの跳躍力だな", "キラキラしたやつ、ちょうだい",
+	"登るごとに税金が増えます", "人間にしては悪くないパフォーマンスね",
+	"きたあああああ今日も財宝よろ！", "待ってました！",
 ]
 const CHAT_ON_STOMP := ["ナイス踏みつけ!", "スライム瞬殺www", "うまい!"]
 const CHAT_ON_DAMAGE := ["危ない!", "被弾しちゃった…", "気をつけて!"]
@@ -81,6 +98,7 @@ const NEW_SUBSCRIBER_MESSAGES := [
 var world: Node2D
 var player: Player
 var sub_viewport: SubViewport
+var content_texture: Texture2D
 
 # --- 塔生成の進行状態 ---
 var rng: RandomNumberGenerator
@@ -119,6 +137,7 @@ func _ready() -> void:
 	rng = RandomNumberGenerator.new()
 	rng.seed = int(Time.get_unix_time_from_system() * 1000) % 2147483647
 	rng.randomize()
+	content_texture = load("res://assets/content.png")
 
 	_build_video_world()
 	_init_environment()
@@ -225,14 +244,10 @@ func _add_platform(x: float, y: float, floor_index: int, is_checkpoint: bool) ->
 	var col := CollisionShape2D.new()
 	col.shape = shape
 	body.add_child(col)
+	body.collision_layer = LAYER_PLATFORM
+	body.collision_mask = 0
 
-	var poly := Polygon2D.new()
-	poly.polygon = PackedVector2Array([
-		Vector2(-w / 2.0, -PLATFORM_HEIGHT / 2.0), Vector2(w / 2.0, -PLATFORM_HEIGHT / 2.0),
-		Vector2(w / 2.0, PLATFORM_HEIGHT / 2.0), Vector2(-w / 2.0, PLATFORM_HEIGHT / 2.0)
-	])
-	poly.color = Color(0.95, 0.8, 0.25) if is_checkpoint else Color(0.55, 0.5, 0.62)
-	body.add_child(poly)
+	_add_platform_texture(body, w, is_checkpoint)
 
 	if floor_index > 0:
 		var label := Label.new()
@@ -241,6 +256,23 @@ func _add_platform(x: float, y: float, floor_index: int, is_checkpoint: bool) ->
 		body.add_child(label)
 
 	world.add_child(body)
+
+func _add_platform_texture(body: StaticBody2D, w: float, is_checkpoint: bool) -> void:
+	var atlas := AtlasTexture.new()
+	atlas.atlas = content_texture
+	atlas.region = CONTENT_OPAQUE_REGION
+	var scale_factor := TILE_RENDER_WIDTH / CONTENT_OPAQUE_REGION.size.x
+	var tile_count := int(ceil(w / TILE_RENDER_WIDTH))
+	for i in range(tile_count):
+		var spr := Sprite2D.new()
+		spr.texture = atlas
+		spr.centered = false
+		spr.scale = Vector2(scale_factor, scale_factor)
+		spr.position = Vector2(-w / 2.0 + i * TILE_RENDER_WIDTH, -PLATFORM_HEIGHT / 2.0)
+		spr.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		if is_checkpoint:
+			spr.modulate = Color(1.25, 1.15, 0.6)
+		body.add_child(spr)
 
 func _add_enemy(x: float, y: float) -> void:
 	var e := Enemy.new()
@@ -303,6 +335,8 @@ func _init_environment() -> void:
 	var lcol := CollisionShape2D.new()
 	lcol.shape = left_shape
 	left_wall.add_child(lcol)
+	left_wall.collision_layer = LAYER_WALL
+	left_wall.collision_mask = 0
 	world.add_child(left_wall)
 
 	right_wall = StaticBody2D.new()
@@ -310,6 +344,8 @@ func _init_environment() -> void:
 	var rcol := CollisionShape2D.new()
 	rcol.shape = right_shape
 	right_wall.add_child(rcol)
+	right_wall.collision_layer = LAYER_WALL
+	right_wall.collision_mask = 0
 	world.add_child(right_wall)
 
 	var safety := StaticBody2D.new()
@@ -319,6 +355,8 @@ func _init_environment() -> void:
 	scol.shape = sshape
 	safety.add_child(scol)
 	safety.position = Vector2(PLAY_WIDTH / 2.0, 120.0)
+	safety.collision_layer = LAYER_WALL
+	safety.collision_mask = 0
 	world.add_child(safety)
 
 	_extend_environment(0)
@@ -594,7 +632,10 @@ func _on_chat_timer_timeout() -> void:
 	chat_timer.wait_time = randf_range(1.2, 3.0)
 
 func _add_chat_message(text: String) -> void:
-	var user: Dictionary = CHAT_USERNAMES.pick_random()
+	var available: Array = CHAT_USERNAMES.filter(func(u: Dictionary) -> bool:
+		return reached_floor >= int(u["unlock_floor"])
+	)
+	var user: Dictionary = available.pick_random()
 	_add_chat_line(user["name"], user["color"], text)
 
 func _random_new_commenter_name() -> String:
@@ -617,6 +658,13 @@ func _add_chat_line(user_name: String, color: Color, text: String) -> void:
 	var color_hex := color.to_html(false)
 	line.text = "[color=#%s]%s[/color]: %s" % [color_hex, user_name, text]
 	line.add_theme_font_size_override("normal_font_size", 13)
+
+	# コメントをクリックすると削除できる（種類を問わず全コメント共通）。
+	# 一旦は分かりやすいUI演出は付けず、押すと文言が置き換わるだけの簡易実装。
+	line.mouse_filter = Control.MOUSE_FILTER_STOP
+	line.mouse_default_cursor_shape = Control.CURSOR_POINTING_HAND
+	line.gui_input.connect(_on_chat_line_gui_input.bind(line))
+
 	chat_vbox.add_child(line)
 
 	if chat_vbox.get_child_count() > 40:
@@ -625,6 +673,13 @@ func _add_chat_line(user_name: String, color: Color, text: String) -> void:
 		oldest.queue_free()
 
 	call_deferred("_scroll_chat_to_bottom")
+
+func _on_chat_line_gui_input(event: InputEvent, line: RichTextLabel) -> void:
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		if line.get_meta("deleted", false):
+			return
+		line.set_meta("deleted", true)
+		line.text = "[color=#777777](このコメントは削除されました)[/color]"
 
 func _scroll_chat_to_bottom() -> void:
 	chat_scroll.scroll_vertical = int(chat_scroll.get_v_scroll_bar().max_value)

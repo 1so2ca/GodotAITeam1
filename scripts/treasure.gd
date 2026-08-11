@@ -7,8 +7,12 @@ signal collected(amount: float)
 
 var amount := 3_000_000.0
 
+# プレイヤーの衝突レイヤー（main.gd/player.gd と揃える）
+const LAYER_PLAYER := 8
+
 func _ready() -> void:
 	_build_visuals()
+	collision_mask = LAYER_PLAYER
 	body_entered.connect(_on_body_entered)
 
 func _build_visuals() -> void:

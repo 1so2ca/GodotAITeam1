@@ -25,6 +25,22 @@ const JUMP_BUFFER_FRAMES := 3
 const JUMP_BOOST_MULTIPLIER := 3.0
 const ROCKET_SPEED := 700.0
 
+# --- 衝突レイヤー（ロケット中は足場(LAYER_PLATFORM)だけ貫通する） ---
+const LAYER_PLATFORM := 1
+const LAYER_WALL := 2
+const LAYER_ENEMY := 4
+const LAYER_PLAYER := 8
+const MASK_NORMAL := LAYER_PLATFORM | LAYER_WALL | LAYER_ENEMY
+const MASK_ROCKET := LAYER_WALL | LAYER_ENEMY
+
+const SFX_JUMP := preload("res://assets/player_jump.wav")
+const SFX_DAMAGE := preload("res://assets/player_damaged2.wav")
+const SFX_ENEMY_KILLED := preload("res://assets/enemy_killed2.wav")
+
+var jump_sfx: AudioStreamPlayer
+var damage_sfx: AudioStreamPlayer
+var enemy_killed_sfx: AudioStreamPlayer
+
 var idle_time := 0.0
 var hitstun_timer := 0.0
 var invuln_timer := 0.0
@@ -43,6 +59,8 @@ func _ready() -> void:
 	_build_visuals()
 	add_to_group("player")
 	jump_buffer_time = JUMP_BUFFER_FRAMES / float(Engine.physics_ticks_per_second)
+	collision_layer = LAYER_PLAYER
+	collision_mask = MASK_NORMAL
 
 func _build_visuals() -> void:
 	var shape := RectangleShape2D.new()
@@ -71,6 +89,18 @@ func _build_visuals() -> void:
 	camera.zoom = Vector2(1.3, 1.3)
 	add_child(camera)
 
+	jump_sfx = AudioStreamPlayer.new()
+	jump_sfx.stream = SFX_JUMP
+	add_child(jump_sfx)
+
+	damage_sfx = AudioStreamPlayer.new()
+	damage_sfx.stream = SFX_DAMAGE
+	add_child(damage_sfx)
+
+	enemy_killed_sfx = AudioStreamPlayer.new()
+	enemy_killed_sfx.stream = SFX_ENEMY_KILLED
+	add_child(enemy_killed_sfx)
+
 func set_camera_limits(left: float, right: float, top: float, bottom: float) -> void:
 	camera.limit_left = int(left)
 	camera.limit_right = int(right)
@@ -82,6 +112,7 @@ func _physics_process(delta: float) -> void:
 		jump_boost_timer -= delta
 
 	if rocket_timer > 0.0:
+		collision_mask = MASK_ROCKET
 		rocket_timer -= delta
 		velocity.y = -ROCKET_SPEED
 		var dir := Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
@@ -90,6 +121,7 @@ func _physics_process(delta: float) -> void:
 			facing = 1 if dir > 0.0 else -1
 			visual.scale.x = facing
 	else:
+		collision_mask = MASK_NORMAL
 		velocity.y = min(velocity.y + GRAVITY * delta, MAX_FALL_SPEED)
 
 		if hitstun_timer > 0.0:
@@ -111,6 +143,7 @@ func _physics_process(delta: float) -> void:
 				var boost := JUMP_BOOST_MULTIPLIER if jump_boost_timer > 0.0 else 1.0
 				velocity.y = JUMP_VELOCITY * boost
 				jump_buffer_timer = 0.0
+				jump_sfx.play()
 
 	if invuln_timer > 0.0:
 		invuln_timer -= delta
@@ -139,7 +172,13 @@ func _handle_collisions() -> void:
 		if collider is Enemy:
 			if col.get_normal().y < -0.5:
 				collider.stomp()
+				enemy_killed_sfx.play()
 				velocity.y = BOUNCE_VELOCITY
+				stomped_enemy.emit()
+			elif invuln_timer > 0.0:
+				# 無敵状態なら、真上以外から触れても敵を倒す
+				collider.stomp()
+				enemy_killed_sfx.play()
 				stomped_enemy.emit()
 			else:
 				take_damage(collider.global_position)
@@ -148,6 +187,7 @@ func take_damage(source_pos: Vector2 = global_position) -> void:
 	if invuln_timer > 0.0 or hitstun_timer > 0.0:
 		return
 	GameState.lose_subscribers(DAMAGE_PENALTY, "被弾")
+	damage_sfx.play()
 	hitstun_timer = HITSTUN_TIME
 	invuln_timer = INVULN_TIME
 	var dir := signf(global_position.x - source_pos.x)

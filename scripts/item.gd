@@ -25,8 +25,12 @@ signal collected(kind: int)
 
 var kind: int = Kind.INVINCIBLE
 
+# プレイヤーの衝突レイヤー（main.gd/player.gd と揃える）
+const LAYER_PLAYER := 8
+
 func _ready() -> void:
 	_build_visuals()
+	collision_mask = LAYER_PLAYER
 	body_entered.connect(_on_body_entered)
 
 func _build_visuals() -> void:
