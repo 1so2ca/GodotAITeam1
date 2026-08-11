@@ -150,7 +150,80 @@ var win_title_label: Label
 var win_chat_timer: Timer
 var clear_sfx: AudioStreamPlayer
 
+var title_layer: CanvasLayer
+var bgm_player: AudioStreamPlayer
+
 func _ready() -> void:
+	_play_bgm()
+	_build_title_screen()
+
+func _play_bgm() -> void:
+	var stream: AudioStreamMP3 = preload("res://assets/bgm.mp3")
+	stream.loop = true
+	bgm_player = AudioStreamPlayer.new()
+	bgm_player.stream = stream
+	add_child(bgm_player)
+	bgm_player.play()
+
+# ---------------------------------------------------------------------------
+# タイトル画面：配信画面の領域（動画エリア）に assets/start.png を表示し、
+# ボタン押下でゲーム画面へ即座に遷移する
+# ---------------------------------------------------------------------------
+
+func _build_title_screen() -> void:
+	title_layer = CanvasLayer.new()
+	title_layer.layer = 20
+	add_child(title_layer)
+
+	# 704x384 の固定サイズで画面中央に配置する
+	var box_w := 704.0
+	var box_h := 384.0
+
+	var bg := TextureRect.new()
+	bg.texture = preload("res://assets/start.png")
+	bg.position = Vector2((VIDEO_WIDTH - box_w) / 2.0, (VIDEO_HEIGHT - box_h) / 2.0)
+	bg.size = Vector2(box_w, box_h)
+	bg.stretch_mode = TextureRect.STRETCH_SCALE
+	title_layer.add_child(bg)
+
+	var prompt_bg := ColorRect.new()
+	prompt_bg.color = Color(0, 0, 0, 0.55)
+	prompt_bg.size = Vector2(VIDEO_WIDTH, 40)
+	prompt_bg.position = Vector2(0, VIDEO_HEIGHT - 40)
+	title_layer.add_child(prompt_bg)
+
+	var prompt := Label.new()
+	prompt.text = "ボタンを押してスタート"
+	prompt.add_theme_font_size_override("font_size", 20)
+	prompt.add_theme_color_override("font_color", Color(1, 1, 0.85))
+	prompt.size = Vector2(VIDEO_WIDTH, 40)
+	prompt.position = Vector2(0, VIDEO_HEIGHT - 40)
+	prompt.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	prompt.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	title_layer.add_child(prompt)
+
+	var blink := create_tween()
+	blink.set_loops()
+	blink.tween_property(prompt, "modulate:a", 0.3, 0.6)
+	blink.tween_property(prompt, "modulate:a", 1.0, 0.6)
+
+func _input(event: InputEvent) -> void:
+	if title_layer == null:
+		return
+	var is_start_input: bool = (
+		(event is InputEventKey and event.pressed and not event.echo)
+		or (event is InputEventMouseButton and event.pressed)
+		or (event is InputEventJoypadButton and event.pressed)
+	)
+	if is_start_input:
+		_on_start_pressed()
+
+func _on_start_pressed() -> void:
+	title_layer.queue_free()
+	title_layer = null
+	_start_game()
+
+func _start_game() -> void:
 	GameState.reset()
 	rng = RandomNumberGenerator.new()
 	rng.seed = int(Time.get_unix_time_from_system() * 1000) % 2147483647
