@@ -11,6 +11,10 @@ const PLAY_WIDTH := 720.0
 const CHECKPOINT_INTERVAL := 10
 const TREASURE_INTERVAL := 8
 const TREASURE_OFFSET := 4
+const ITEM_SPAWN_CHANCE := 0.15
+# 塔の乱数シードは固定なので、確率任せだと同じ場所でずっと外れ続けることがある。
+# 抽選対象の階が一定回数連続で外れたら強制的に出現させ、必ずどこかで手に入るようにする。
+const ITEM_PITY_FLOORS := 10
 
 # --- 塔は階数制限なし。プレイヤーの到達に応じて先読み生成する ---
 const INITIAL_FLOORS := 40
@@ -28,12 +32,12 @@ const FLOOR_BONUS := 1_500_000.0
 const CHECKPOINT_BONUS := 10_000_000.0
 
 # --- 減少条件のしきい値・レート ---
+# 「落下」は特殊なテレポート判定を持たない。物理挙動のまま一番下まで自然に落ちる。
+# 最高到達点から一定以上離れた状態が続くと、まとめて一度だけ減点し、基準点を
+# その場にリセットする（＝自動減少を止める）。ここでまた離れれば再度減点される。
 const DESCEND_THRESHOLD := FLOOR_HEIGHT * 0.9
 const DESCEND_GRACE := 1.5
-const DESCEND_DRAIN_PER_SEC := 200_000.0
-const FALL_THRESHOLD := FLOOR_HEIGHT * 2.5
-const FALL_PENALTY := 2_000_000.0
-const FALL_COOLDOWN := 1.5
+const DESCEND_PENALTY := 2_000_000.0
 
 const POPUP_MIN_DELTA := 50_000
 
@@ -84,6 +88,7 @@ var prev_x: float = 0.0
 var prev_width: float = 0.0
 var generated_floor: int = 0
 var bands_generated_up_to: int = -5
+var floors_since_item: int = 0
 
 # --- 背景・境界壁（塔の伸長に合わせて拡張する） ---
 var bg_poly: Polygon2D
@@ -93,12 +98,9 @@ var left_shape: RectangleShape2D
 var right_wall: StaticBody2D
 var right_shape: RectangleShape2D
 
-var checkpoint_positions: Array[Vector2] = []
 var max_height_y: float = 0.0
 var reached_floor: int = 0
-var last_checkpoint_pos: Vector2 = Vector2.ZERO
 var descend_timer: float = 0.0
-var fall_cooldown_timer: float = 0.0
 
 var ui_layer: CanvasLayer
 var ui_root: Control
@@ -115,7 +117,8 @@ var win_stats_label: Label
 func _ready() -> void:
 	GameState.reset()
 	rng = RandomNumberGenerator.new()
-	rng.seed = 20260811
+	rng.seed = int(Time.get_unix_time_from_system() * 1000) % 2147483647
+	rng.randomize()
 
 	_build_video_world()
 	_init_environment()
@@ -160,7 +163,6 @@ func _build_video_world() -> void:
 func _generate_start_platform() -> void:
 	var start_x := PLAY_WIDTH / 2.0
 	_add_platform(start_x, 0.0, 0, false)
-	last_checkpoint_pos = Vector2(start_x, -PLATFORM_HEIGHT / 2.0 - 30.0)
 	max_height_y = 0.0
 	prev_x = start_x
 	prev_width = PLATFORM_WIDTH
@@ -196,11 +198,16 @@ func _extend_tower(target_floor: int) -> void:
 		_add_platform(x, y, i, is_checkpoint)
 
 		if is_checkpoint:
-			checkpoint_positions.append(Vector2(x, y - PLATFORM_HEIGHT / 2.0 - 30.0))
+			pass
 		elif i % TREASURE_INTERVAL == TREASURE_OFFSET:
 			_add_treasure(x, y)
 		elif i % 3 == 0 and i > 2:
 			_add_enemy(x, y)
+		else:
+			floors_since_item += 1
+			if rng.randf() < ITEM_SPAWN_CHANCE or floors_since_item >= ITEM_PITY_FLOORS:
+				_add_item(x, y)
+				floors_since_item = 0
 
 		prev_x = x
 		prev_width = this_width
@@ -245,6 +252,40 @@ func _add_treasure(x: float, y: float) -> void:
 	var t := Treasure.new()
 	t.position = Vector2(x, y - PLATFORM_HEIGHT / 2.0 - 20.0)
 	world.add_child(t)
+
+func _add_item(x: float, y: float) -> void:
+	var it := Item.new()
+	var kinds := [Item.Kind.INVINCIBLE, Item.Kind.JUMP_BOOST, Item.Kind.ROCKET]
+	it.kind = kinds[rng.randi_range(0, kinds.size() - 1)]
+	it.position = Vector2(x, y - PLATFORM_HEIGHT / 2.0 - 20.0)
+	it.collected.connect(_on_item_collected)
+	world.add_child(it)
+
+func _on_item_collected(kind: int) -> void:
+	var text: String
+	match kind:
+		Item.Kind.INVINCIBLE:
+			text = "⚡ 無敵タイム!"
+		Item.Kind.JUMP_BOOST:
+			text = "⬆ ジャンプ力3倍!"
+		Item.Kind.ROCKET:
+			text = "🚀 ロケット発進!"
+		_:
+			text = ""
+	_spawn_item_popup(text)
+
+func _spawn_item_popup(text: String) -> void:
+	var lbl := Label.new()
+	lbl.text = text
+	lbl.add_theme_font_size_override("font_size", 20)
+	lbl.add_theme_color_override("font_color", Color(0.5, 0.85, 1.0))
+	lbl.position = Vector2(randf_range(-10.0, 10.0), 0.0)
+	popup_container.add_child(lbl)
+	var tw := create_tween()
+	tw.set_parallel(true)
+	tw.tween_property(lbl, "position:y", lbl.position.y - 40.0, 1.4)
+	tw.tween_property(lbl, "modulate:a", 0.0, 1.4)
+	tw.chain().tween_callback(lbl.queue_free)
 
 # ---------------------------------------------------------------------------
 # 背景・境界壁（塔の伸長に合わせて拡張する）
@@ -338,30 +379,23 @@ func _process(delta: float) -> void:
 			GameState.add_subscribers(FLOOR_BONUS, "登頂中")
 			if reached_floor % CHECKPOINT_INTERVAL == 0:
 				GameState.add_subscribers(CHECKPOINT_BONUS, "階層到達ボーナス!")
-				var idx := reached_floor / CHECKPOINT_INTERVAL - 1
-				if idx >= 0 and idx < checkpoint_positions.size():
-					last_checkpoint_pos = checkpoint_positions[idx]
 			floor_label.text = "現在 %d 階" % reached_floor
 
 		if reached_floor + GENERATE_AHEAD > generated_floor:
 			_extend_tower(generated_floor + GENERATE_BATCH)
 
+	# 「落下」に特殊なテレポート判定は設けない。物理挙動のまま一番下まで自然に落下させる。
+	# 最高到達点から離れた状態が続いたら、まとめて一度だけ減点して基準点をその場に
+	# リセットする（＝自動減少はそこで止まる。さらに離れれば再度減点される）。
 	var depth_below_best := y - max_height_y
 	if depth_below_best > DESCEND_THRESHOLD:
 		descend_timer += delta
 		if descend_timer > DESCEND_GRACE:
-			GameState.lose_subscribers(DESCEND_DRAIN_PER_SEC * delta, "降下")
+			GameState.lose_subscribers(DESCEND_PENALTY, "降下")
+			max_height_y = y
+			descend_timer = 0.0
 	else:
 		descend_timer = 0.0
-
-	if fall_cooldown_timer > 0.0:
-		fall_cooldown_timer -= delta
-	elif depth_below_best > FALL_THRESHOLD:
-		GameState.lose_subscribers(FALL_PENALTY, "落下")
-		player.teleport_to(last_checkpoint_pos)
-		max_height_y = min(max_height_y, last_checkpoint_pos.y)
-		descend_timer = 0.0
-		fall_cooldown_timer = FALL_COOLDOWN
 
 # ---------------------------------------------------------------------------
 # 動画エリアのオーバーレイ（LIVEバッジ・タイトル・決め台詞・増減ポップアップ）

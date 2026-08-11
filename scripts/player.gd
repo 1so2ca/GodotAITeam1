@@ -20,10 +20,21 @@ const INVULN_TIME := 1.2
 const IDLE_GRACE := 2.5
 const IDLE_DRAIN_PER_SEC := 300_000.0
 
+const JUMP_BUFFER_FRAMES := 3
+
+const JUMP_BOOST_MULTIPLIER := 3.0
+const ROCKET_SPEED := 700.0
+
 var idle_time := 0.0
 var hitstun_timer := 0.0
 var invuln_timer := 0.0
 var facing := 1
+
+var jump_buffer_timer := 0.0
+var jump_buffer_time := 0.05
+
+var jump_boost_timer := 0.0
+var rocket_timer := 0.0
 
 var visual: Node2D
 var camera: Camera2D
@@ -31,6 +42,7 @@ var camera: Camera2D
 func _ready() -> void:
 	_build_visuals()
 	add_to_group("player")
+	jump_buffer_time = JUMP_BUFFER_FRAMES / float(Engine.physics_ticks_per_second)
 
 func _build_visuals() -> void:
 	var shape := RectangleShape2D.new()
@@ -66,18 +78,39 @@ func set_camera_limits(left: float, right: float, top: float, bottom: float) -> 
 	camera.limit_bottom = int(bottom)
 
 func _physics_process(delta: float) -> void:
-	velocity.y = min(velocity.y + GRAVITY * delta, MAX_FALL_SPEED)
+	if jump_boost_timer > 0.0:
+		jump_boost_timer -= delta
 
-	if hitstun_timer > 0.0:
-		hitstun_timer -= delta
-	else:
+	if rocket_timer > 0.0:
+		rocket_timer -= delta
+		velocity.y = -ROCKET_SPEED
 		var dir := Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
 		velocity.x = dir * SPEED
 		if dir != 0.0:
 			facing = 1 if dir > 0.0 else -1
 			visual.scale.x = facing
-		if Input.is_action_just_pressed("jump") and is_on_floor():
-			velocity.y = JUMP_VELOCITY
+	else:
+		velocity.y = min(velocity.y + GRAVITY * delta, MAX_FALL_SPEED)
+
+		if hitstun_timer > 0.0:
+			hitstun_timer -= delta
+		else:
+			var dir := Input.get_action_strength("move_right") - Input.get_action_strength("move_left")
+			velocity.x = dir * SPEED
+			if dir != 0.0:
+				facing = 1 if dir > 0.0 else -1
+				visual.scale.x = facing
+
+			# ジャンプ先行入力：着地の少し前に押しても、着地した瞬間にジャンプする
+			if Input.is_action_just_pressed("jump"):
+				jump_buffer_timer = jump_buffer_time
+			else:
+				jump_buffer_timer = max(jump_buffer_timer - delta, 0.0)
+
+			if jump_buffer_timer > 0.0 and is_on_floor():
+				var boost := JUMP_BOOST_MULTIPLIER if jump_boost_timer > 0.0 else 1.0
+				velocity.y = JUMP_VELOCITY * boost
+				jump_buffer_timer = 0.0
 
 	if invuln_timer > 0.0:
 		invuln_timer -= delta
@@ -88,6 +121,16 @@ func _physics_process(delta: float) -> void:
 	move_and_slide()
 	_handle_collisions()
 	_update_idle(delta)
+
+func apply_item_effect(kind: int, duration: float) -> void:
+	match kind:
+		Item.Kind.INVINCIBLE:
+			invuln_timer = max(invuln_timer, duration)
+		Item.Kind.JUMP_BOOST:
+			jump_boost_timer = duration
+		Item.Kind.ROCKET:
+			rocket_timer = duration
+			invuln_timer = max(invuln_timer, duration)
 
 func _handle_collisions() -> void:
 	for i in get_slide_collision_count():
@@ -120,8 +163,3 @@ func _update_idle(delta: float) -> void:
 			GameState.lose_subscribers(IDLE_DRAIN_PER_SEC * delta, "放置")
 	else:
 		idle_time = 0.0
-
-func teleport_to(pos: Vector2) -> void:
-	global_position = pos
-	velocity = Vector2.ZERO
-	invuln_timer = 1.0
